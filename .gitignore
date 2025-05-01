@@ -1,0 +1,7 @@
+node_modules/
+.env
+ca.pem
+.DS_Store
+*.log
+/mlms-backend/.env
+/mlms-backend/ca.pem
