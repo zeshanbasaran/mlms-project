@@ -1,3 +1,12 @@
+/**
+ * Admin Router - MLMS (Music Library Management System)
+ * -------------------------------------------------------
+ * Provides admin-only routes for managing artists, albums,
+ * tracks, genres, playlists, dashboard metrics, and admin
+ * account operations. Requires JWT token authentication
+ * with admin role.
+ */
+
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
@@ -5,17 +14,16 @@ const pool = require('../db');
 const router = express.Router();
 require('dotenv').config();
 
-// 🔐 Middleware: Admin-only JWT auth
+/**
+ * Middleware: Verifies JWT and ensures admin role
+ */
 function authAdmin(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ message: 'Missing token' });
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    if (decoded.role !== 'admin') {
-      return res.status(403).json({ message: 'Admins only' });
-    }
-
+    if (decoded.role !== 'admin') return res.status(403).json({ message: 'Admins only' });
     req.user = decoded;
     next();
   } catch (err) {
@@ -24,7 +32,11 @@ function authAdmin(req, res, next) {
   }
 }
 
-// ✅ Add Artist
+/* ===========================
+   ARTIST ROUTES
+=========================== */
+
+// Add a new artist
 router.post('/add-artist', authAdmin, async (req, res) => {
   const { name, biography } = req.body;
   if (!name || !biography) return res.status(400).json({ message: 'Name and biography required' });
@@ -38,10 +50,35 @@ router.post('/add-artist', authAdmin, async (req, res) => {
   }
 });
 
-// ✅ Add Album
+// Delete an artist and cascade delete related albums and tracks
+router.delete('/delete-artist/:id', authAdmin, async (req, res) => {
+  const artistId = req.params.id;
+  try {
+    await pool.query(`
+      DELETE Track 
+      FROM Track 
+      JOIN Album ON Track.AlbumID = Album.AlbumID 
+      WHERE Album.ArtistID = ?
+    `, [artistId]);
+    await pool.query('DELETE FROM Album WHERE ArtistID = ?', [artistId]);
+    await pool.query('DELETE FROM Artist WHERE ArtistID = ?', [artistId]);
+    res.sendStatus(204);
+  } catch (err) {
+    console.error('Delete artist error:', err.message);
+    res.status(500).json({ message: 'Error deleting artist' });
+  }
+});
+
+/* ===========================
+   ALBUM ROUTES
+=========================== */
+
+// Add a new album
 router.post('/add-album', authAdmin, async (req, res) => {
   const { title, releaseYear, genreId, artistId } = req.body;
-  if (!title || !releaseYear || !genreId || !artistId) return res.status(400).json({ message: 'All fields required' });
+  if (!title || !releaseYear || !genreId || !artistId) {
+    return res.status(400).json({ message: 'All fields required' });
+  }
 
   try {
     await pool.query(
@@ -55,7 +92,34 @@ router.post('/add-album', authAdmin, async (req, res) => {
   }
 });
 
-// ✅ Add Track
+// Delete album and all associated tracks
+router.delete('/delete-album/:id', authAdmin, async (req, res) => {
+  const albumId = req.params.id;
+  try {
+    const [tracks] = await pool.query('SELECT track_id FROM Track WHERE AlbumID = ?', [albumId]);
+    const trackIds = tracks.map(row => row.track_id);
+
+    if (trackIds.length) {
+      await pool.query('DELETE FROM PlaylistTrack WHERE track_id IN (?)', [trackIds]);
+      await pool.query('DELETE FROM LikedSongs WHERE track_id IN (?)', [trackIds]);
+      await pool.query('DELETE FROM DownloadHistory WHERE track_id IN (?)', [trackIds]);
+      await pool.query('DELETE FROM PlaybackHistory WHERE track_id IN (?)', [trackIds]);
+      await pool.query('DELETE FROM Track WHERE track_id IN (?)', [trackIds]);
+    }
+
+    await pool.query('DELETE FROM Album WHERE AlbumID = ?', [albumId]);
+    res.json({ message: 'Album and associated tracks deleted successfully' });
+  } catch (err) {
+    console.error('Delete album error:', err.message);
+    res.status(500).json({ message: 'Error deleting album' });
+  }
+});
+
+/* ===========================
+   TRACK ROUTES
+=========================== */
+
+// Add a new track
 router.post('/add-track', authAdmin, async (req, res) => {
   const { title, duration, filePath = '', albumId, artistId, genreId } = req.body;
   if (!title || !duration || !albumId || !artistId || !genreId) {
@@ -64,7 +128,7 @@ router.post('/add-track', authAdmin, async (req, res) => {
 
   try {
     await pool.query(
-      'INSERT INTO Track (Title, Duration, FilePath, AlbumID, ArtistID, GenreID) VALUES (?, ?, ?, ?, ?, ?)',
+      'INSERT INTO Track (title, duration, file_path, AlbumID, ArtistID, GenreID) VALUES (?, ?, ?, ?, ?, ?)',
       [title, duration, filePath, albumId, artistId, genreId]
     );
     res.json({ message: 'Track added' });
@@ -74,54 +138,63 @@ router.post('/add-track', authAdmin, async (req, res) => {
   }
 });
 
-// ✅ Delete Artist
-router.delete('/delete-artist/:id', authAdmin, async (req, res) => {
-  const artistId = req.params.id;
+// Delete track and its references from related tables
+router.delete('/delete-track/:id', authAdmin, async (req, res) => {
+  const trackId = req.params.id;
+
   try {
-    await pool.query(`DELETE Track FROM Track JOIN Album ON Track.AlbumID = Album.AlbumID WHERE Album.ArtistID = ?`, [artistId]);
-    await pool.query('DELETE FROM Album WHERE ArtistID = ?', [artistId]);
-    await pool.query('DELETE FROM Artist WHERE ArtistID = ?', [artistId]);
-    res.sendStatus(204);
+    await pool.query('DELETE FROM PlaylistTrack WHERE track_id = ?', [trackId]);
+    await pool.query('DELETE FROM LikedSongs WHERE track_id = ?', [trackId]);
+    await pool.query('DELETE FROM DownloadHistory WHERE track_id = ?', [trackId]);
+    await pool.query('DELETE FROM PlaybackHistory WHERE track_id = ?', [trackId]);
+    await pool.query('DELETE FROM Track WHERE track_id = ?', [trackId]);
+
+    res.json({ message: 'Track and references deleted successfully' });
   } catch (err) {
-    console.error('Delete artist error:', err.message);
-    res.status(500).json({ message: 'Error deleting artist' });
+    console.error('Delete track error:', err.message);
+    res.status(500).json({ message: 'Error deleting track' });
   }
 });
 
-// ✅ Update Password
-router.post('/change-password', authAdmin, async (req, res) => {
-  const adminId = req.user.id;
-  const { oldPassword, newPassword } = req.body;
+/* ===========================
+   GENRE ROUTES
+=========================== */
+
+// Add a new genre
+router.post('/add-genre', authAdmin, async (req, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ message: 'Genre name required' });
 
   try {
-    const [[admin]] = await pool.query('SELECT Password FROM User WHERE user_id = ?', [adminId]);
-    const valid = await bcrypt.compare(oldPassword, admin.Password);
-    if (!valid) return res.status(401).json({ message: 'Incorrect password' });
-
-    const hashed = await bcrypt.hash(newPassword, 10);
-    await pool.query('UPDATE User SET Password = ? WHERE user_id = ?', [hashed, adminId]);
-    res.json({ message: 'Password updated' });
+    const [result] = await pool.query('INSERT INTO Genre (Name) VALUES (?)', [name]);
+    res.json({ GenreID: result.insertId });
   } catch (err) {
-    console.error('Admin password change error:', err.message);
-    res.status(500).json({ message: 'Error changing password' });
+    console.error('Add genre error:', err.message);
+    res.status(500).json({ message: 'Error creating genre' });
   }
 });
 
-// ✅ Summary Metrics
+/* ===========================
+   DASHBOARD ROUTES
+=========================== */
+
+// Return summary statistics for dashboard
 router.get('/summary', authAdmin, async (req, res) => {
   try {
+    const [[{ count: users }]] = await pool.query('SELECT COUNT(*) as count FROM User');
     const [[{ count: artists }]] = await pool.query('SELECT COUNT(*) as count FROM Artist');
     const [[{ count: albums }]] = await pool.query('SELECT COUNT(*) as count FROM Album');
     const [[{ count: tracks }]] = await pool.query('SELECT COUNT(*) as count FROM Track');
     const [[{ count: playlists }]] = await pool.query('SELECT COUNT(*) as count FROM Playlist');
-    res.json({ artists, albums, tracks, playlists });
+
+    res.json({ users, artists, albums, tracks, playlists });
   } catch (err) {
     console.error('Summary error:', err.message);
     res.status(500).json({ message: 'Error fetching summary' });
   }
 });
 
-// ✅ Recent Activity
+// Return recent admin activity (last 10 changes)
 router.get('/recent-activity', authAdmin, async (req, res) => {
   try {
     const [rows] = await pool.query(`
@@ -146,40 +219,49 @@ router.get('/recent-activity', authAdmin, async (req, res) => {
   }
 });
 
-// ✅ Manage Genres
-router.post('/add-genre', authAdmin, async (req, res) => {
-  const { name } = req.body;
-  if (!name) return res.status(400).json({ message: 'Genre name required' });
+/* ===========================
+   ACCOUNT MANAGEMENT
+=========================== */
+
+// Admin password change
+router.post('/change-password', authAdmin, async (req, res) => {
+  const adminId = req.user.id;
+  const { oldPassword, newPassword } = req.body;
 
   try {
-    const [result] = await pool.query('INSERT INTO Genre (Name) VALUES (?)', [name]);
-    res.json({ GenreID: result.insertId });
+    const [[admin]] = await pool.query('SELECT Password FROM User WHERE user_id = ?', [adminId]);
+    const valid = await bcrypt.compare(oldPassword, admin.Password);
+    if (!valid) return res.status(401).json({ message: 'Incorrect password' });
+
+    const hashed = await bcrypt.hash(newPassword, 10);
+    await pool.query('UPDATE User SET Password = ? WHERE user_id = ?', [hashed, adminId]);
+    res.json({ message: 'Password updated' });
   } catch (err) {
-    console.error('Add genre error:', err.message);
-    res.status(500).json({ message: 'Error creating genre' });
+    console.error('Admin password change error:', err.message);
+    res.status(500).json({ message: 'Error changing password' });
   }
 });
 
-// ✅ Admin Create Playlist
+/* ===========================
+   PLAYLIST MANAGEMENT
+=========================== */
+
+// Admin creates a playlist with track IDs
 router.post('/create-playlist', authAdmin, async (req, res) => {
   const { name, trackIds } = req.body;
-
-  if (!name || !Array.isArray(trackIds) || trackIds.length === 0) {
+  if (!name || !Array.isArray(trackIds) || !trackIds.length) {
     return res.status(400).json({ message: 'Playlist name and track IDs are required' });
   }
 
   try {
-    const [playlistResult] = await pool.query(
+    const [result] = await pool.query(
       'INSERT INTO Playlist (user_id, name, created_at) VALUES (?, ?, NOW())',
       [req.user.id, name]
     );
-    const playlistId = playlistResult.insertId;
+    const playlistId = result.insertId;
 
     const values = trackIds.map(trackId => [playlistId, trackId]);
-    await pool.query(
-      'INSERT INTO PlaylistTrack (playlist_id, track_id) VALUES ?',
-      [values]
-    );
+    await pool.query('INSERT INTO PlaylistTrack (playlist_id, track_id) VALUES ?', [values]);
 
     res.json({ message: 'Playlist created successfully', playlistId });
   } catch (err) {
@@ -188,7 +270,7 @@ router.post('/create-playlist', authAdmin, async (req, res) => {
   }
 });
 
-// ✅ Admin: Get all playlists with track details
+// Admin fetches their playlists and included tracks
 router.get('/playlists', authAdmin, async (req, res) => {
   try {
     const [rows] = await pool.query(`
@@ -204,9 +286,8 @@ router.get('/playlists', authAdmin, async (req, res) => {
       LEFT JOIN Track t ON t.track_id = pt.track_id
       WHERE p.user_id = ?
       ORDER BY p.playlist_id, pt.position
-    `, [req.user.id]);    
+    `, [req.user.id]);
 
-    // Group tracks by playlist
     const playlists = {};
     for (const row of rows) {
       if (!playlists[row.PlaylistID]) {
@@ -227,26 +308,68 @@ router.get('/playlists', authAdmin, async (req, res) => {
 
     res.json(Object.values(playlists));
   } catch (err) {
-    console.error('Error fetching playlists:', err.message);
+    console.error('Fetch playlists error:', err.message);
     res.status(500).json({ message: 'Server error fetching playlists' });
   }
 });
 
-// ✅ Admin: Delete a playlist
+// Admin deletes a playlist
 router.delete('/delete-playlist/:playlistId', authAdmin, async (req, res) => {
   const playlistId = req.params.playlistId;
 
   try {
-    // Delete associated tracks first
     await pool.query('DELETE FROM PlaylistTrack WHERE playlist_id = ?', [playlistId]);
-
-    // Then delete the playlist itself
     await pool.query('DELETE FROM Playlist WHERE playlist_id = ?', [playlistId]);
-
     res.json({ message: 'Playlist deleted successfully' });
   } catch (err) {
     console.error('Delete playlist error:', err.message);
     res.status(500).json({ message: 'Error deleting playlist' });
+  }
+});
+
+/* ===========================
+   UPDATE MANAGEMENT
+=========================== */
+
+router.put('/update-artist/:id', authAdmin, async (req, res) => {
+  const artistId = req.params.id;
+  const { name, biography } = req.body;
+  try {
+    await pool.query('UPDATE Artist SET Name = ?, Biography = ? WHERE ArtistID = ?', [name, biography, artistId]);
+    res.json({ message: 'Artist updated' });
+  } catch (err) {
+    console.error('Update artist error:', err.message);
+    res.status(500).json({ message: 'Error updating artist' });
+  }
+});
+
+router.put('/update-album/:id', authAdmin, async (req, res) => {
+  const albumId = req.params.id;
+  const { title, releaseYear, genreId, artistId } = req.body;
+  try {
+    await pool.query(
+      'UPDATE Album SET Title = ?, ReleaseYear = ?, GenreID = ?, ArtistID = ? WHERE AlbumID = ?',
+      [title, releaseYear, genreId, artistId, albumId]
+    );
+    res.json({ message: 'Album updated' });
+  } catch (err) {
+    console.error('Update album error:', err.message);
+    res.status(500).json({ message: 'Error updating album' });
+  }
+});
+
+router.put('/update-track/:id', authAdmin, async (req, res) => {
+  const trackId = req.params.id;
+  const { title, duration, albumId, artistId, genreId } = req.body;
+  try {
+    await pool.query(
+      'UPDATE Track SET Title = ?, Duration = ?, AlbumID = ?, ArtistID = ?, GenreID = ? WHERE track_id = ?',
+      [title, duration, albumId, artistId, genreId, trackId]
+    );
+    res.json({ message: 'Track updated' });
+  } catch (err) {
+    console.error('Update track error:', err.message);
+    res.status(500).json({ message: 'Error updating track' });
   }
 });
 
