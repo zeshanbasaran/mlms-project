@@ -2,8 +2,8 @@ const mysql = require('mysql2/promise');
 const fs = require('fs');
 require('dotenv').config();
 
-async function seedArtists() {
-  const config = {
+async function seedTracks() {
+  const connection = await mysql.createConnection({
     host: process.env.DB_HOST,
     port: Number(process.env.DB_PORT),
     user: process.env.DB_USER,
@@ -12,154 +12,299 @@ async function seedArtists() {
     ssl: {
       ca: fs.readFileSync(__dirname + '/ca.pem'),
     },
-  };
+  });
 
-  const connection = await mysql.createConnection(config);
   console.log('✅ Connected to database');
+  const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+
+  const genres = [
+    { id: 1, name: 'R&B', description: 'Rhythm and Blues' },
+    { id: 2, name: 'Pop', description: 'Popular music' },
+    { id: 3, name: 'Folk', description: 'Folk and indie acoustic' },
+    { id: 4, name: 'Hip Hop', description: 'Hip hop and underground rap' },
+    { id: 5, name: 'Rap', description: 'Rap and Southern hip hop' },
+    { id: 6, name: 'Indie Rock', description: 'Alternative and indie rock' },
+    { id: 7, name: 'Soul', description: 'Soul and blues' },
+    { id: 8, name: 'Southern Rock', description: 'Southern and country rock' },
+  ];
 
   try {
     await connection.query('SET FOREIGN_KEY_CHECKS = 0');
-    const tables = ['PlaybackHistory', 'DownloadHistory', 'SearchHistory', 'LikedSongs', 'PlaylistTrack', 'Playlist', 'Track', 'Album', 'Artist', 'User'];
-    for (const table of tables) {
-      await connection.query(`DELETE FROM ${table}`);
-    }
-    await connection.query('SET FOREIGN_KEY_CHECKS = 1');
-    console.log('🗑️ Cleared all tables');
 
-    const data = [
-      {
-        name: 'Kendrick Lamar',
-        bio: 'American rapper and songwriter known for his powerful lyrics and storytelling.',
-        albums: [
-          {
-            title: 'good kid, m.A.A.d city',
-            year: 2012,
-            genre: 'Hip Hop',
-            songs: ['Poetic Justice', "Sing About Me, I'm Dying of Thirst", 'Money Trees']
-          },
-          {
-            title: 'DAMN.',
-            year: 2017,
-            genre: 'Hip Hop',
-            songs: ['LOYALTY.', 'PRIDE.', 'LOVE.']
-          }
-        ]
-      },
+    // Insert genres
+    for (const genre of genres) {
+      await connection.query(
+        `INSERT IGNORE INTO genres (genre_id, name, description, created_at)
+         VALUES (?, ?, ?, ?)`,
+        [genre.id, genre.name, genre.description, now]
+      );
+    }
+
+    const artists = [
       {
         name: 'SZA',
-        bio: 'American singer-songwriter blending R&B, soul, and hip hop.',
+        genre_id: 1,
         albums: [
           {
             title: 'Ctrl',
-            year: 2017,
-            genre: 'R&B',
-            songs: ['Love Galore', 'The Weekend', 'Garden']
+            release_year: 2017,
+            tracks: [
+              'Supermodel',
+              'Love Galore',
+              'Doves in the Wind',
+              'Drew Barrymore',
+              'Prom',
+            ],
           },
           {
             title: 'SOS',
-            year: 2022,
-            genre: 'R&B',
-            songs: ['Nobody Gets Me', 'Ghost in the Machine', 'Gone Girl']
-          }
-        ]
-      },
-      {
-        name: 'The Lumineers',
-        bio: 'American folk rock band known for their heartfelt lyrics and acoustic sound.',
-        albums: [
-          {
-            title: 'The Lumineers',
-            year: 2012,
-            genre: 'Folk Rock',
-            songs: ['Ho Hey', 'Stubborn Love', 'Flowers in Your Hair']
+            release_year: 2022,
+            tracks: [
+              'SOS',
+              'Kill Bill',
+              'Seek & Destroy',
+              'Low',
+              'Love Language',
+            ],
           },
-          {
-            title: 'Cleopatra',
-            year: 2016,
-            genre: 'Folk Rock',
-            songs: ['Ophelia', 'Angela', 'Sleep on the Floor']
-          }
-        ]
+        ],
       },
       {
         name: 'Chappell Roan',
-        bio: 'American pop singer and songwriter with theatrical and emotional pop anthems.',
+        genre_id: 2,
         albums: [
           {
             title: 'The Rise and Fall of a Midwest Princess',
-            year: 2023,
-            genre: 'Pop',
-            songs: ['Pink Pony Club', 'Casual', 'Kaleidoscope']
+            release_year: 2023,
+            tracks: [
+              'Femininomenon',
+              'Red Wine Supernova',
+              'After Midnight',
+              'Coffee',
+              'Casual',
+            ],
           },
           {
-            title: 'Roan & On',
-            year: 2024,
-            genre: 'Pop',
-            songs: ['Naked in Manhattan', 'Super Graphic Ultra Modern Girl', 'Red Wine Supernova']
-          }
-        ]
+            title: 'School Nights',
+            release_year: 2017,
+            tracks: [
+              'Die Young',
+              'Good Hurt',
+              'Meantime',
+              'Sugar High',
+              'Bad for You',
+            ],
+          },
+        ],
       },
       {
         name: 'Noah Kahan',
-        bio: 'American singer-songwriter known for introspective folk-pop ballads.',
+        genre_id: 3,
         albums: [
           {
             title: 'Stick Season',
-            year: 2022,
-            genre: 'Folk Pop',
-            songs: ['Stick Season', 'Homesick', 'Everywhere, Everything']
+            release_year: 2022,
+            tracks: [
+              'Northern Attitude',
+              'Stick Season',
+              'All My Love',
+              'She Calls Me Back',
+              'Come Over',
+            ],
           },
           {
             title: 'Busyhead',
-            year: 2019,
-            genre: 'Folk Pop',
-            songs: ['Mess', 'False Confidence', 'Young Blood']
-          }
-        ]
-      }
+            release_year: 2019,
+            tracks: [
+              'False Confidence',
+              'Mess',
+              'Hurt Somebody',
+              'Young Blood',
+              'Busyhead',
+            ],
+          },
+        ],
+      },
+      {
+        name: 'MF DOOM',
+        genre_id: 4,
+        albums: [
+          {
+            title: 'MM..FOOD',
+            release_year: 2004,
+            tracks: [
+              'Beef Rapp',
+              'Hoe Cakes',
+              'Potholderz',
+              'One Beer',
+              'Deep Fried Frenz',
+            ],
+          },
+          {
+            title: 'Operation: Doomsday',
+            release_year: 1999,
+            tracks: [
+              'Doomsday',
+              'Rhymes Like Dimes',
+              'The Finest',
+              'Go With The Flow',
+              'Tick, Tick…',
+            ],
+          },
+        ],
+      },
+      {
+        name: 'Outkast',
+        genre_id: 5,
+        albums: [
+          {
+            title: 'Stankonia',
+            release_year: 2000,
+            tracks: [
+              'Gasoline Dreams',
+              'So Fresh, So Clean',
+              'Ms. Jackson',
+              'B.O.B.',
+              'Humble Mumble',
+            ],
+          },
+          {
+            title: 'Aquemini',
+            release_year: 1998,
+            tracks: [
+              'Hold On, Be Strong',
+              'Return of the "G"',
+              'Rosa Parks',
+              'Skew It on the Bar-B',
+              'Aquemini',
+            ],
+          },
+        ],
+      },
+      {
+        name: 'Mitski',
+        genre_id: 6,
+        albums: [
+          {
+            title: 'Be the Cowboy',
+            release_year: 2018,
+            tracks: [
+              'Geyser',
+              'Why Didn’t You Stop Me?',
+              'Old Friend',
+              'A Pearl',
+              'Lonesome Love',
+            ],
+          },
+          {
+            title: 'Laurel Hell',
+            release_year: 2022,
+            tracks: [
+              'Valentine, Texas',
+              'Working for the Knife',
+              'Stay Soft',
+              'Everyone',
+              'Heat Lightning',
+            ],
+          },
+        ],
+      },
+      {
+        name: 'Hozier',
+        genre_id: 7,
+        albums: [
+          {
+            title: 'Hozier',
+            release_year: 2014,
+            tracks: [
+              'Take Me to Church',
+              'Angel of Small Death and the Codeine Scene',
+              'Jackie and Wilson',
+              'Someone New',
+              'Work Song',
+            ],
+          },
+          {
+            title: 'Wasteland, Baby!',
+            release_year: 2019,
+            tracks: [
+              'Nina Cried Power',
+              'Almost (Sweet Music)',
+              'Movement',
+              'No Plan',
+              'Nobody',
+            ],
+          },
+        ],
+      },
+      {
+        name: 'The Red Clay Strays',
+        genre_id: 8,
+        albums: [
+          {
+            title: 'Moment of Truth',
+            release_year: 2022,
+            tracks: [
+              'Stone’s Throw',
+              'Moment of Truth',
+              'Do Me Wrong',
+              'Wondering Why',
+              'Forgive',
+            ],
+          },
+          {
+            title: 'Made by These Moments',
+            release_year: 2024,
+            tracks: [
+              'Heavy Heart',
+              'Ghosts',
+              'She’s No Good',
+              'Don’t Care',
+              'Sunshine',
+            ],
+          },
+        ],
+      },
     ];
 
-    for (const artist of data) {
-      const [artistResult] = await connection.execute(
-        'INSERT INTO Artist (Name, Biography, CreatedAt) VALUES (?, ?, NOW())',
-        [artist.name, artist.bio]
+    let artist_id = 1;
+    let album_id = 1;
+    let track_id = 1;
+
+    for (const artist of artists) {
+      await connection.query(
+        `INSERT INTO artists (artist_id, name, biography, created_at) VALUES (?, ?, ?, ?)`,
+        [artist_id, artist.name, `${artist.name} biography`, now]
       );
-      const artistId = artistResult.insertId;
 
       for (const album of artist.albums) {
-        await connection.execute(
-          'INSERT IGNORE INTO Genre (Name, Description) VALUES (?, ?)',
-          [album.genre, `${album.genre} music`]
+        await connection.query(
+          `INSERT INTO albums (album_id, artist_id, genre_id, title, release_year, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [album_id, artist_id, artist.genre_id, album.title, album.release_year, now]
         );
 
-        const [[{ GenreID }]] = await connection.execute(
-          'SELECT GenreID FROM Genre WHERE Name = ?',
-          [album.genre]
-        );
-
-        const [albumResult] = await connection.execute(
-          'INSERT INTO Album (Title, ReleaseYear, ArtistID, GenreID, CreatedAt) VALUES (?, ?, ?, ?, NOW())',
-          [album.title, album.year, artistId, GenreID]
-        );
-        const albumId = albumResult.insertId;
-
-        for (const song of album.songs) {
-          await connection.execute(
-            'INSERT INTO Track (Title, Duration, file_path, AlbumID, ArtistID, GenreID, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, NOW())',
-            [song, '03:00', `/music/${song}.mp3`, albumId, artistId, GenreID]
+        for (const trackTitle of album.tracks) {
+          await connection.query(
+            `INSERT INTO tracks (track_id, title, duration_seconds, file_path, album_id, artist_id, genre_id, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [track_id, trackTitle, 180, null, album_id, artist_id, artist.genre_id, now]
           );
-          console.log(`🎵 Inserted: ${song}`);
+          track_id++;
         }
+        album_id++;
       }
+
+      artist_id++;
     }
 
-    console.log('✅ Database seeded with artists and tracks');
-  } catch (err) {
-    console.error('❌ Seeding error:', err.message);
-  } finally {
+    await connection.query('SET FOREIGN_KEY_CHECKS = 1');
+    console.log('🎵 Data seeded successfully!');
     await connection.end();
-    console.log('🔚 Connection closed');
+  } catch (err) {
+    console.error('❌ Error inserting tracks:', err);
+    await connection.end();
   }
 }
 
-seedArtists();
+seedTracks();

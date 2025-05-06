@@ -6,72 +6,44 @@
  */
 
 const express = require('express');
-const pool = require('../db');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
 const router = express.Router();
-require('dotenv').config();
+const bcrypt = require('bcryptjs');
+const pool = require('../db');
+const { authenticateUser, authorizeAdmin } = require('../middleware/auth');
+const { logUserActivity, getTrackTitle } = require('../utils/helpers');
 
-/* ====================== AUTHENTICATION MIDDLEWARE ====================== */
+// ===========================
+// Dashboard / Summary
+// ===========================
 
-/**
- * Middleware to authenticate JWT and attach user info to req.user
- */
-function authenticateUser(req, res, next) {
-  const token = req.headers.authorization?.split(' ')[1];
-  if (!token) return res.status(401).json({ message: 'No token provided' });
-
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
-    next();
-  } catch (err) {
-    console.error('JWT error:', err.message);
-    return res.status(403).json({ message: 'Invalid or expired token' });
-  }
-}
-
-/* ========================= HELPER FUNCTIONS ========================= */
-
-/**
- * Logs a user action into the UserActivity table
- */
-async function logUserActivity(userId, activity) {
-  if (!userId || !activity) return;
-  try {
-    await pool.query(
-      'INSERT INTO UserActivity (user_id, activity, timestamp) VALUES (?, ?, NOW())',
-      [userId, activity]
-    );
-  } catch (err) {
-    console.error('Activity log failed:', err.message);
-  }
-}
-
-/**
- * Fetches a track title by ID
- */
-async function getTrackTitle(trackId) {
-  const [[track]] = await pool.query('SELECT title FROM Track WHERE track_id = ?', [trackId]);
-  return track?.title || `ID ${trackId}`;
-}
-
-/* ============================ DASHBOARD ============================ */
-
-// Returns user-level stats
+// User summary with basic stats
 router.get('/summary', authenticateUser, async (req, res) => {
   const userId = req.user.id;
   try {
-    const [[likedSongs]] = await pool.query('SELECT COUNT(*) AS count FROM LikedSongs WHERE user_id = ?', [userId]);
-    const [[playlists]] = await pool.query('SELECT COUNT(*) AS count FROM Playlist WHERE user_id = ?', [userId]);
-    const [[recentlyPlayed]] = await pool.query('SELECT COUNT(*) AS count FROM PlaybackHistory WHERE user_id = ?', [userId]);
-    const [[totalTracks]] = await pool.query('SELECT COUNT(*) AS count FROM Track');
+    const [[likedTracks]] = await pool.query(
+      'SELECT COUNT(*) AS count FROM liked_tracks WHERE user_id = ?',
+      [userId]
+    );
+
+    const [[playlistCount]] = await pool.query(
+      'SELECT COUNT(*) AS count FROM playlists WHERE user_id = ?',
+      [userId]
+    );
+
+    const [[historyCount]] = await pool.query(
+      'SELECT COUNT(*) AS count FROM playback_history WHERE user_id = ?',
+      [userId]
+    );
+
+    const [[trackCount]] = await pool.query(
+      'SELECT COUNT(*) AS count FROM tracks'
+    );
 
     res.json({
-      likedSongs: likedSongs.count,
-      playlists: playlists.count,
-      recentlyPlayed: recentlyPlayed.count,
-      totalTracks: totalTracks.count
+      likedTracks: likedTracks.count,
+      playlists: playlistCount.count,
+      recentlyPlayed: historyCount.count,
+      totalTracks: trackCount.count
     });
   } catch (err) {
     console.error('Summary error:', err.message);
@@ -79,11 +51,11 @@ router.get('/summary', authenticateUser, async (req, res) => {
   }
 });
 
-// Fetch user recent activity
+// Recent user activity log (last 10 actions)
 router.get('/recent-activity', authenticateUser, async (req, res) => {
   try {
     const [rows] = await pool.query(
-      'SELECT activity, timestamp FROM UserActivity WHERE user_id = ? ORDER BY timestamp DESC LIMIT 10',
+      'SELECT activity, timestamp FROM user_activity WHERE user_id = ? ORDER BY timestamp DESC LIMIT 10',
       [req.user.id]
     );
     res.json(rows);
@@ -93,7 +65,7 @@ router.get('/recent-activity', authenticateUser, async (req, res) => {
   }
 });
 
-// Manually log activity
+// Manual user activity log entry
 router.post('/recent-activity', authenticateUser, async (req, res) => {
   try {
     await logUserActivity(req.user.id, req.body.activity);
@@ -104,13 +76,16 @@ router.post('/recent-activity', authenticateUser, async (req, res) => {
   }
 });
 
-/* ============================ PROFILE ============================ */
+// ===========================
+// User Profile Management
+// ===========================
 
-// Fetch user's name and email
+// Get user's name, email, and role
 router.get('/profile', authenticateUser, async (req, res) => {
   try {
     const [[user]] = await pool.query(
-      'SELECT name, email FROM User WHERE user_id = ?', [req.user.id]
+      'SELECT name, email, role FROM users WHERE user_id = ?',
+      [req.user.id]
     );
     if (!user) return res.status(404).json({ message: 'User not found' });
     res.json(user);
@@ -120,12 +95,15 @@ router.get('/profile', authenticateUser, async (req, res) => {
   }
 });
 
-// Update user's name/email
+// Update name or email
 router.put('/profile', authenticateUser, async (req, res) => {
   const { name, email } = req.body;
   try {
-    await pool.query('UPDATE User SET name = ?, email = ? WHERE user_id = ?', [name, email, req.user.id]);
-    await logUserActivity(req.user.id, `Updated profile`);
+    await pool.query(
+      'UPDATE users SET name = ?, email = ? WHERE user_id = ?',
+      [name, email, req.user.id]
+    );
+    await logUserActivity(req.user.id, 'Updated profile');
     res.json({ message: 'Profile updated' });
   } catch (err) {
     console.error('Update profile error:', err.message);
@@ -133,18 +111,24 @@ router.put('/profile', authenticateUser, async (req, res) => {
   }
 });
 
-// Change user password
+// Change password
 router.post('/change-password', authenticateUser, async (req, res) => {
   const { oldPassword, newPassword } = req.body;
   try {
-    const [[user]] = await pool.query('SELECT password FROM User WHERE user_id = ?', [req.user.id]);
+    const [[user]] = await pool.query(
+      'SELECT password_hash FROM users WHERE user_id = ?',
+      [req.user.id]
+    );
     if (!user) return res.status(404).json({ message: 'User not found' });
 
-    const isMatch = await bcrypt.compare(oldPassword, user.password);
-    if (!isMatch) return res.status(401).json({ message: 'Current password is incorrect' });
+    const isMatch = await bcrypt.compare(oldPassword, user.password_hash);
+    if (!isMatch) return res.status(401).json({ message: 'Incorrect current password' });
 
     const hashed = await bcrypt.hash(newPassword, 10);
-    await pool.query('UPDATE User SET password = ? WHERE user_id = ?', [hashed, req.user.id]);
+    await pool.query(
+      'UPDATE users SET password_hash = ? WHERE user_id = ?',
+      [hashed, req.user.id]
+    );
     await logUserActivity(req.user.id, 'Changed password');
     res.json({ message: 'Password changed successfully' });
   } catch (err) {
@@ -153,29 +137,46 @@ router.post('/change-password', authenticateUser, async (req, res) => {
   }
 });
 
-/* ======================= SUBSCRIPTION ======================= */
+// ===========================
+// Subscriptions Management
+// ===========================
 
-// Get current user's subscription
+// Get current user's subscription info
 router.get('/subscription', authenticateUser, async (req, res) => {
   try {
-    const [[row]] = await pool.query('SELECT plan FROM Subscription WHERE user_id = ?', [req.user.id]);
-    res.json({ plan: row?.plan || 'Free' });
+    const [[subscription]] = await pool.query(
+      'SELECT subscription_type, start_date, end_date, is_active FROM subscriptions WHERE user_id = ?',
+      [req.user.id]
+    );
+    res.json(subscription || { subscription_type: 'Free', is_active: 0 });
   } catch (err) {
     console.error('Get subscription error:', err.message);
     res.status(500).json({ message: 'Error fetching subscription' });
   }
 });
 
-// Update or create subscription plan
+// Update or create a subscription
 router.put('/subscription', authenticateUser, async (req, res) => {
-  const { plan } = req.body;
+  const { subscription_type, start_date, end_date, is_active } = req.body;
   try {
-    const [existing] = await pool.query('SELECT * FROM Subscription WHERE user_id = ?', [req.user.id]);
+    const [existing] = await pool.query(
+      'SELECT subscription_id FROM subscriptions WHERE user_id = ?',
+      [req.user.id]
+    );
 
     if (existing.length > 0) {
-      await pool.query('UPDATE Subscription SET plan = ? WHERE user_id = ?', [plan, req.user.id]);
+      await pool.query(
+        `UPDATE subscriptions 
+         SET subscription_type = ?, start_date = ?, end_date = ?, is_active = ?
+         WHERE user_id = ?`,
+        [subscription_type, start_date, end_date, is_active ? 1 : 0, req.user.id]
+      );
     } else {
-      await pool.query('INSERT INTO Subscription (user_id, plan, start_date) VALUES (?, ?, CURDATE())', [req.user.id, plan]);
+      await pool.query(
+        `INSERT INTO subscriptions (user_id, subscription_type, start_date, end_date, is_active)
+         VALUES (?, ?, ?, ?, ?)`,
+        [req.user.id, subscription_type, start_date, end_date, is_active ? 1 : 0]
+      );
     }
 
     res.json({ message: 'Subscription updated' });
@@ -185,20 +186,21 @@ router.put('/subscription', authenticateUser, async (req, res) => {
   }
 });
 
-/* ======================== TRACK INTERACTIONS ======================== */
+// ===========================
+// Track Interactions (Likes)
+// ===========================
 
-/**
- * Like a track: adds it to the user's LikedSongs
- */
+// Like a track
 router.post('/like', authenticateUser, async (req, res) => {
   const userId = req.user.id;
   const { trackId } = req.body;
 
   try {
     await pool.query(
-      'INSERT IGNORE INTO LikedSongs (user_id, track_id, liked_at) VALUES (?, ?, NOW())',
+      'INSERT IGNORE INTO liked_tracks (user_id, track_id, liked_at) VALUES (?, ?, NOW())',
       [userId, trackId]
     );
+
     const title = await getTrackTitle(trackId);
     await logUserActivity(userId, `Liked "${title}"`);
     res.json({ message: 'Track liked' });
@@ -208,15 +210,17 @@ router.post('/like', authenticateUser, async (req, res) => {
   }
 });
 
-/**
- * Unlike a track: removes it from the user's LikedSongs
- */
+// Unlike a track
 router.delete('/like/:trackId', authenticateUser, async (req, res) => {
   const userId = req.user.id;
   const trackId = req.params.trackId;
 
   try {
-    await pool.query('DELETE FROM LikedSongs WHERE user_id = ? AND track_id = ?', [userId, trackId]);
+    await pool.query(
+      'DELETE FROM liked_tracks WHERE user_id = ? AND track_id = ?',
+      [userId, trackId]
+    );
+
     const title = await getTrackTitle(trackId);
     await logUserActivity(userId, `Unliked "${title}"`);
     res.json({ message: 'Track unliked' });
@@ -226,16 +230,12 @@ router.delete('/like/:trackId', authenticateUser, async (req, res) => {
   }
 });
 
-/**
- * Returns list of liked track IDs (lightweight version)
- */
+// Get list of liked track IDs
 router.get('/liked-tracks', authenticateUser, async (req, res) => {
-  const userId = req.user.id;
-
   try {
     const [rows] = await pool.query(
-      'SELECT track_id FROM LikedSongs WHERE user_id = ?',
-      [userId]
+      'SELECT track_id FROM liked_tracks WHERE user_id = ?',
+      [req.user.id]
     );
     res.json(rows);
   } catch (err) {
@@ -244,132 +244,112 @@ router.get('/liked-tracks', authenticateUser, async (req, res) => {
   }
 });
 
-/**
- * Returns detailed metadata for all liked tracks
- */
+// Get detailed info for all liked tracks
 router.get('/liked-tracks-detailed', authenticateUser, async (req, res) => {
-  const userId = req.user.id;
-
   try {
     const [rows] = await pool.query(`
       SELECT 
         t.track_id AS TrackID,
         t.title AS Title,
-        t.duration AS Duration,
-        t.AlbumID,
-        a.Title AS AlbumTitle,
-        a.ReleaseYear,
-        a.ArtistID,
-        ar.Name AS ArtistName,
-        t.GenreID,
-        g.Name AS GenreName
-      FROM LikedSongs ls
-      JOIN Track t ON ls.track_id = t.track_id
-      JOIN Album a ON t.AlbumID = a.AlbumID
-      JOIN Artist ar ON t.ArtistID = ar.ArtistID
-      JOIN Genre g ON t.GenreID = g.GenreID
-      WHERE ls.user_id = ?
-    `, [userId]);
+        t.duration_seconds AS Duration,
+        t.album_id AS AlbumID,
+        a.title AS AlbumTitle,
+        a.release_year AS ReleaseYear,
+        ar.artist_id AS ArtistID,
+        ar.name AS ArtistName,
+        g.genre_id AS GenreID,
+        g.name AS GenreName
+      FROM liked_tracks lt
+      JOIN tracks t ON lt.track_id = t.track_id
+      JOIN albums a ON t.album_id = a.album_id
+      JOIN artists ar ON t.artist_id = ar.artist_id
+      JOIN genres g ON t.genre_id = g.genre_id
+      WHERE lt.user_id = ?
+    `, [req.user.id]);
 
     res.json(rows);
   } catch (err) {
-    console.error('Error fetching liked tracks (detailed):', err.message);
-    res.status(500).json({ message: 'Error fetching liked songs' });
+    console.error('Liked tracks detailed error:', err.message);
+    res.status(500).json({ message: 'Error fetching liked tracks' });
   }
 });
 
-/* ======================== PLAYLIST MANAGEMENT ======================== */
+// ===========================
+// Playlist Management
+// ===========================
 
-/**
- * Get all playlists owned by the user
- */
+// Get all playlists owned by the user
 router.get('/playlists', authenticateUser, async (req, res) => {
-  const userId = req.user.id;
-
   try {
     const [rows] = await pool.query(
-      'SELECT playlist_id, name, created_at FROM Playlist WHERE user_id = ? ORDER BY created_at DESC',
-      [userId]
+      'SELECT playlist_id, name, created_at FROM playlists WHERE user_id = ? ORDER BY created_at DESC',
+      [req.user.id]
     );
     res.json(rows);
   } catch (err) {
-    console.error('Error fetching user playlists:', err.message);
+    console.error('Fetch playlists error:', err.message);
     res.status(500).json({ message: 'Error fetching playlists' });
   }
 });
 
-/**
- * Get all tracks in a specific playlist owned by the user
- */
+// Get tracks in a specific playlist
 router.get('/playlists/:playlistId/tracks', authenticateUser, async (req, res) => {
-  const userId = req.user.id;
-  const playlistId = req.params.playlistId;
+  const { playlistId } = req.params;
 
   try {
-    // Confirm ownership
     const [[playlist]] = await pool.query(
-      'SELECT * FROM Playlist WHERE playlist_id = ? AND user_id = ?',
-      [playlistId, userId]
+      'SELECT * FROM playlists WHERE playlist_id = ? AND user_id = ?',
+      [playlistId, req.user.id]
     );
     if (!playlist) return res.status(403).json({ message: 'Unauthorized or playlist not found' });
 
-    // Fetch tracks
-    const [rows] = await pool.query(`
+    const [tracks] = await pool.query(`
       SELECT 
         t.track_id AS TrackID,
         t.title AS Title,
-        t.duration AS Duration,
-        t.AlbumID,
-        a.Title AS AlbumTitle,
-        a.ReleaseYear,
-        t.ArtistID,
-        ar.Name AS ArtistName,
-        t.GenreID,
-        g.Name AS GenreName
-      FROM PlaylistTrack pt
-      JOIN Track t ON pt.track_id = t.track_id
-      JOIN Album a ON t.AlbumID = a.AlbumID
-      JOIN Artist ar ON t.ArtistID = ar.ArtistID
-      JOIN Genre g ON t.GenreID = g.GenreID
+        t.duration_seconds AS Duration,
+        a.title AS AlbumTitle,
+        ar.name AS ArtistName,
+        g.name AS GenreName,
+        pt.track_order AS TrackOrder
+      FROM playlist_tracks pt
+      JOIN tracks t ON pt.track_id = t.track_id
+      JOIN albums a ON t.album_id = a.album_id
+      JOIN artists ar ON t.artist_id = ar.artist_id
+      JOIN genres g ON t.genre_id = g.genre_id
       WHERE pt.playlist_id = ?
+      ORDER BY pt.track_order ASC, pt.added_at ASC
     `, [playlistId]);
 
-    res.json(rows);
+    res.json(tracks);
   } catch (err) {
-    console.error('Error fetching playlist tracks:', err.message);
-    res.status(500).json({ message: 'Error fetching tracks' });
+    console.error('Fetch playlist tracks error:', err.message);
+    res.status(500).json({ message: 'Error fetching playlist tracks' });
   }
 });
 
-/**
- * Create a new playlist
- */
+// Create a new playlist
 router.post('/playlists', authenticateUser, async (req, res) => {
-  const userId = req.user.id;
   const { name } = req.body;
-
   if (!name || !name.trim()) {
     return res.status(400).json({ message: 'Playlist name is required' });
   }
 
   try {
     await pool.query(
-      'INSERT INTO Playlist (user_id, name, created_at) VALUES (?, ?, NOW())',
-      [userId, name.trim()]
+      'INSERT INTO playlists (user_id, name, created_at) VALUES (?, ?, NOW())',
+      [req.user.id, name.trim()]
     );
-    await logUserActivity(userId, `Created new playlist: ${name}`);
+    await logUserActivity(req.user.id, `Created new playlist: ${name}`);
     res.json({ message: 'Playlist created' });
   } catch (err) {
-    console.error('Error creating playlist:', err.message);
+    console.error('Create playlist error:', err.message);
     res.status(500).json({ message: 'Error creating playlist' });
   }
 });
 
-/**
- * Rename a playlist
- */
+// Rename a playlist
 router.put('/playlists/:playlistId', authenticateUser, async (req, res) => {
-  const userId = req.user.id;
   const { playlistId } = req.params;
   const { name } = req.body;
 
@@ -379,257 +359,203 @@ router.put('/playlists/:playlistId', authenticateUser, async (req, res) => {
 
   try {
     const [[playlist]] = await pool.query(
-      'SELECT * FROM Playlist WHERE playlist_id = ? AND user_id = ?',
-      [playlistId, userId]
+      'SELECT * FROM playlists WHERE playlist_id = ? AND user_id = ?',
+      [playlistId, req.user.id]
     );
-    if (!playlist) return res.status(403).json({ message: 'Unauthorized' });
+    if (!playlist) return res.status(403).json({ message: 'Unauthorized or playlist not found' });
 
     await pool.query(
-      'UPDATE Playlist SET name = ? WHERE playlist_id = ?',
+      'UPDATE playlists SET name = ? WHERE playlist_id = ?',
       [name.trim(), playlistId]
     );
-    res.json({ message: 'Playlist renamed successfully' });
+    res.json({ message: 'Playlist renamed' });
   } catch (err) {
     console.error('Rename playlist error:', err.message);
     res.status(500).json({ message: 'Error renaming playlist' });
   }
 });
 
-/**
- * Delete a playlist and its track references
- */
+// Delete a playlist
 router.delete('/playlists/:playlistId', authenticateUser, async (req, res) => {
-  const userId = req.user.id;
-  const playlistId = Number(req.params.playlistId);
+  const { playlistId } = req.params;
 
   try {
     const [[playlist]] = await pool.query(
-      'SELECT * FROM Playlist WHERE playlist_id = ? AND user_id = ?',
-      [playlistId, userId]
+      'SELECT * FROM playlists WHERE playlist_id = ? AND user_id = ?',
+      [playlistId, req.user.id]
     );
+    if (!playlist) return res.status(403).json({ message: 'Unauthorized or playlist not found' });
 
-    if (!playlist) {
-      console.warn(`Playlist ${playlistId} not found or not owned by user ${userId}`);
-      return res.status(403).json({ message: 'Unauthorized or playlist not found' });
-    }
+    await pool.query('DELETE FROM playlist_tracks WHERE playlist_id = ?', [playlistId]);
+    await pool.query('DELETE FROM playlists WHERE playlist_id = ?', [playlistId]);
 
-    await pool.query('DELETE FROM PlaylistTrack WHERE playlist_id = ?', [playlistId]);
-    await pool.query('DELETE FROM Playlist WHERE playlist_id = ?', [playlistId]);
-
-    await logUserActivity(userId, `Deleted playlist ID ${playlistId}`);
+    await logUserActivity(req.user.id, `Deleted playlist ID ${playlistId}`);
     res.json({ message: 'Playlist deleted' });
   } catch (err) {
-    console.error('Error deleting playlist:', err.message);
+    console.error('Delete playlist error:', err.message);
     res.status(500).json({ message: 'Error deleting playlist' });
   }
 });
 
-/**
- * Add a track to a playlist (only if not already present)
- */
+// Add a track to a playlist
 router.post('/playlists/:playlistId/add-track', authenticateUser, async (req, res) => {
-  const userId = req.user.id;
-  const playlistId = req.params.playlistId;
-  const { trackId } = req.body;
+  const { playlistId } = req.params;
+  const { trackId, track_order } = req.body;
 
   try {
     const [[playlist]] = await pool.query(
-      'SELECT * FROM Playlist WHERE playlist_id = ? AND user_id = ?',
-      [playlistId, userId]
+      'SELECT * FROM playlists WHERE playlist_id = ? AND user_id = ?',
+      [playlistId, req.user.id]
     );
     if (!playlist) return res.status(403).json({ message: 'Unauthorized or playlist not found' });
 
     const [result] = await pool.query(
-      'INSERT IGNORE INTO PlaylistTrack (playlist_id, track_id) VALUES (?, ?)',
-      [playlistId, trackId]
+      'INSERT IGNORE INTO playlist_tracks (playlist_id, track_id, track_order, added_at) VALUES (?, ?, ?, NOW())',
+      [playlistId, trackId, track_order || 0]
     );
     if (result.affectedRows === 0) {
       return res.status(409).json({ message: 'Track already in playlist' });
     }
 
     const title = await getTrackTitle(trackId);
-    await logUserActivity(userId, `Added "${title}" to playlist "${playlist.name}"`);
+    await logUserActivity(req.user.id, `Added "${title}" to playlist "${playlist.name}"`);
     res.json({ message: 'Track added to playlist' });
   } catch (err) {
-    console.error('Error adding track to playlist:', err.message);
+    console.error('Add track to playlist error:', err.message);
     res.status(500).json({ message: 'Error adding track to playlist' });
   }
 });
 
-/**
- * Remove a track from a playlist
- */
+// Remove a track from a playlist
 router.delete('/playlists/:playlistId/remove-track/:trackId', authenticateUser, async (req, res) => {
-  const userId = req.user.id;
   const { playlistId, trackId } = req.params;
 
   try {
     const [[playlist]] = await pool.query(
-      'SELECT * FROM Playlist WHERE playlist_id = ? AND user_id = ?',
-      [playlistId, userId]
+      'SELECT * FROM playlists WHERE playlist_id = ? AND user_id = ?',
+      [playlistId, req.user.id]
     );
     if (!playlist) return res.status(403).json({ message: 'Unauthorized or playlist not found' });
 
     await pool.query(
-      'DELETE FROM PlaylistTrack WHERE playlist_id = ? AND track_id = ?',
+      'DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?',
       [playlistId, trackId]
     );
 
     const title = await getTrackTitle(trackId);
-    await logUserActivity(userId, `Removed "${title}" from playlist "${playlist.name}"`);
+    await logUserActivity(req.user.id, `Removed "${title}" from playlist "${playlist.name}"`);
     res.json({ message: 'Track removed from playlist' });
   } catch (err) {
-    console.error('Error removing track from playlist:', err.message);
+    console.error('Remove track from playlist error:', err.message);
     res.status(500).json({ message: 'Error removing track from playlist' });
   }
 });
 
-/**
- * Add a track to the user's "Favorites" playlist (create it if needed)
- */
-router.post('/playlists/add-track-to-favorites', authenticateUser, async (req, res) => {
-  const userId = req.user.id;
-  const { trackId } = req.body;
+// ===========================
+// Public Playlists (Admin-Curated)
+// ===========================
 
-  try {
-    let [playlist] = await pool.query(
-      "SELECT playlist_id FROM Playlist WHERE user_id = ? AND name = 'Favorites'",
-      [userId]
-    );
-
-    let playlistId;
-    if (playlist.length === 0) {
-      const [result] = await pool.query(
-        "INSERT INTO Playlist (user_id, name, created_at) VALUES (?, 'Favorites', NOW())",
-        [userId]
-      );
-      playlistId = result.insertId;
-    } else {
-      playlistId = playlist[0].playlist_id;
-    }
-
-    await pool.query(
-      'INSERT IGNORE INTO PlaylistTrack (playlist_id, track_id) VALUES (?, ?)',
-      [playlistId, trackId]
-    );
-
-    await logUserActivity(userId, `Liked track ID ${trackId}`);
-    res.json({ message: 'Track added to Favorites' });
-  } catch (err) {
-    console.error('Error adding to Favorites:', err.message);
-    res.status(500).json({ message: 'Error adding track to Favorites' });
-  }
-});
-
-/* =================== ADMIN PLAYLIST (PUBLIC) FUNCTIONS =================== */
-
-/**
- * Get all playlists created by admin users (for public browsing)
- * Group tracks under each playlist
- */
+// Get all public playlists created by admin users
 router.get('/public-playlists', async (req, res) => {
   try {
     const [rows] = await pool.query(`
       SELECT 
         p.playlist_id AS PlaylistID,
-        p.name AS Name,
+        p.name AS PlaylistName,
+        u.name AS CreatedBy,
         pt.track_id AS TrackID,
-        t.title AS Title,
-        t.duration AS Duration
-      FROM Playlist p
-      JOIN User u ON u.user_id = p.user_id
-      LEFT JOIN PlaylistTrack pt ON pt.playlist_id = p.playlist_id
-      LEFT JOIN Track t ON t.track_id = pt.track_id
+        t.title AS TrackTitle,
+        t.duration_seconds AS Duration,
+        ar.name AS ArtistName,
+        a.title AS AlbumTitle,
+        g.name AS GenreName,
+        pt.track_order AS TrackOrder
+      FROM playlists p
+      JOIN users u ON p.user_id = u.user_id
+      JOIN playlist_tracks pt ON p.playlist_id = pt.playlist_id
+      JOIN tracks t ON pt.track_id = t.track_id
+      JOIN artists ar ON t.artist_id = ar.artist_id
+      JOIN albums a ON t.album_id = a.album_id
+      JOIN genres g ON t.genre_id = g.genre_id
       WHERE u.role = 'admin'
-      ORDER BY p.playlist_id, pt.position
+      ORDER BY p.playlist_id, pt.track_order, pt.added_at
     `);
 
-    // Organize results into nested playlists with track arrays
-    const playlists = {};
+    // Group by playlist
+    const grouped = {};
     for (const row of rows) {
-      if (!playlists[row.PlaylistID]) {
-        playlists[row.PlaylistID] = {
+      if (!grouped[row.PlaylistID]) {
+        grouped[row.PlaylistID] = {
           PlaylistID: row.PlaylistID,
-          Name: row.Name,
-          tracks: [],
+          Name: row.PlaylistName,
+          CreatedBy: row.CreatedBy,
+          Tracks: []
         };
       }
-      if (row.TrackID) {
-        playlists[row.PlaylistID].tracks.push({
-          TrackID: row.TrackID,
-          Title: row.Title,
-          Duration: row.Duration,
-        });
-      }
+
+      grouped[row.PlaylistID].Tracks.push({
+        TrackID: row.TrackID,
+        Title: row.TrackTitle,
+        Duration: row.Duration,
+        Artist: row.ArtistName,
+        Album: row.AlbumTitle,
+        Genre: row.GenreName,
+        Order: row.TrackOrder
+      });
     }
 
-    res.json(Object.values(playlists));
+    res.json(Object.values(grouped));
   } catch (err) {
-    console.error('Error fetching admin-created playlists:', err.message);
+    console.error('Fetch admin playlists error:', err.message);
     res.status(500).json({ message: 'Failed to fetch admin playlists' });
   }
 });
 
-/**
- * Copy a public admin playlist into the user's library
- * 1. Validate it's an admin playlist
- * 2. Duplicate the playlist record under the current user
- * 3. Copy all track associations into the new playlist
- */
+// Copy a public playlist into the authenticated user's library
 router.post('/save-playlist/:playlistId', authenticateUser, async (req, res) => {
   const userId = req.user.id;
   const { playlistId } = req.params;
 
   try {
-    // Step 1: Confirm it's an admin-created playlist
-    const [[originalPlaylist]] = await pool.query(`
-      SELECT Playlist.name AS playlist_name, Playlist.user_id 
-      FROM Playlist 
-      JOIN User ON Playlist.user_id = User.user_id 
-      WHERE Playlist.playlist_id = ? AND User.role = 'admin'
+    // Validate ownership
+    const [[original]] = await pool.query(`
+      SELECT p.name AS playlist_name
+      FROM playlists p
+      JOIN users u ON p.user_id = u.user_id
+      WHERE p.playlist_id = ? AND u.role = 'admin'
     `, [playlistId]);
 
-    if (!originalPlaylist) {
-      return res.status(404).json({ message: 'Admin playlist not found' });
+    if (!original) {
+      return res.status(404).json({ message: 'Public playlist not found' });
     }
 
-    // Step 2: Create a copy of the playlist for the user
+    // Duplicate playlist for user
     const [insertResult] = await pool.query(
-      'INSERT INTO Playlist (user_id, name, created_at) VALUES (?, ?, NOW())',
-      [userId, originalPlaylist.playlist_name]
+      'INSERT INTO playlists (user_id, name, created_at) VALUES (?, ?, NOW())',
+      [userId, original.playlist_name]
     );
     const newPlaylistId = insertResult.insertId;
 
-    // Step 3: Copy all tracks into the user's new playlist
+    // Copy all tracks into new playlist
     await pool.query(`
-      INSERT INTO PlaylistTrack (playlist_id, track_id, position)
-      SELECT ?, track_id, position
-      FROM PlaylistTrack
+      INSERT INTO playlist_tracks (playlist_id, track_id, track_order, added_at)
+      SELECT ?, track_id, track_order, NOW()
+      FROM playlist_tracks
       WHERE playlist_id = ?
     `, [newPlaylistId, playlistId]);
 
-    // Step 4: Fetch and return the new playlist info
-    const [[newPlaylist]] = await pool.query(`
-      SELECT playlist_id, name, created_at 
-      FROM Playlist 
-      WHERE playlist_id = ?
-    `, [newPlaylistId]);
-
-    res.json({
-      message: 'Playlist copied to your library',
-      playlist: newPlaylist
-    });
+    res.json({ message: 'Playlist saved to your library', playlist_id: newPlaylistId });
   } catch (err) {
-    console.error('Save playlist error:', err.message);
+    console.error('Save public playlist error:', err.message);
     res.status(500).json({ message: 'Error saving playlist' });
   }
 });
 
-/* ========================== PLAYBACK TRACKING ========================== */
+// ===========================
+// Playback Tracking
+// ===========================
 
-/**
- * Get the most recently played track for the authenticated user
- */
+// Get the most recently played track for the authenticated user
 router.get('/now-playing', authenticateUser, async (req, res) => {
   const userId = req.user.id;
 
@@ -638,19 +564,20 @@ router.get('/now-playing', authenticateUser, async (req, res) => {
       SELECT 
         t.track_id AS TrackID,
         t.title AS Title,
-        t.duration AS Duration,
-        t.AlbumID,
-        a.Title AS AlbumTitle,
-        a.ReleaseYear,
-        a.ArtistID,
-        ar.Name AS ArtistName,
-        t.GenreID,
-        g.Name AS GenreName
-      FROM PlaybackHistory ph
-      JOIN Track t ON ph.track_id = t.track_id
-      JOIN Album a ON t.AlbumID = a.AlbumID
-      JOIN Artist ar ON t.ArtistID = ar.ArtistID
-      JOIN Genre g ON t.GenreID = g.GenreID
+        t.duration_seconds AS Duration,
+        a.album_id AS AlbumID,
+        a.title AS AlbumTitle,
+        a.release_year AS ReleaseYear,
+        ar.artist_id AS ArtistID,
+        ar.name AS ArtistName,
+        g.genre_id AS GenreID,
+        g.name AS GenreName,
+        ph.played_at AS LastPlayed
+      FROM playback_history ph
+      JOIN tracks t ON ph.track_id = t.track_id
+      JOIN albums a ON t.album_id = a.album_id
+      JOIN artists ar ON t.artist_id = ar.artist_id
+      JOIN genres g ON t.genre_id = g.genre_id
       WHERE ph.user_id = ?
       ORDER BY ph.played_at DESC
       LIMIT 1
@@ -663,22 +590,19 @@ router.get('/now-playing', authenticateUser, async (req, res) => {
   }
 });
 
-/**
- * Log a new track play into the PlaybackHistory table
- */
+// Log a new track play into the playback history
 router.post('/playback', authenticateUser, async (req, res) => {
   const userId = req.user.id;
   const { trackId } = req.body;
 
   try {
     await pool.query(
-      'INSERT INTO PlaybackHistory (user_id, track_id, played_at) VALUES (?, ?, NOW())',
+      'INSERT INTO playback_history (user_id, track_id, played_at) VALUES (?, ?, NOW())',
       [userId, trackId]
     );
 
     const title = await getTrackTitle(trackId);
     await logUserActivity(userId, `Played "${title}"`);
-
     res.json({ message: 'Playback logged' });
   } catch (err) {
     console.error('Playback error:', err.message);
@@ -686,12 +610,16 @@ router.post('/playback', authenticateUser, async (req, res) => {
   }
 });
 
-/* ========================== LIBRARY BROWSING ========================== */
+// ===========================
+// Library Browsing
+// ===========================
 
 // Get all artists
 router.get('/artists', async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM Artist');
+    const [rows] = await pool.query(
+      'SELECT artist_id, name, biography, created_at FROM artists ORDER BY name ASC'
+    );
     res.json(rows);
   } catch (err) {
     console.error('Get artists error:', err.message);
@@ -702,7 +630,9 @@ router.get('/artists', async (req, res) => {
 // Get all genres
 router.get('/genres', async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM Genre');
+    const [rows] = await pool.query(
+      'SELECT genre_id, name, description, created_at FROM genres ORDER BY name ASC'
+    );
     res.json(rows);
   } catch (err) {
     console.error('Get genres error:', err.message);
@@ -713,7 +643,21 @@ router.get('/genres', async (req, res) => {
 // Get all albums
 router.get('/albums', async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM Album');
+    const [rows] = await pool.query(`
+      SELECT 
+        a.album_id,
+        a.title AS AlbumTitle,
+        a.release_year,
+        ar.artist_id,
+        ar.name AS ArtistName,
+        g.genre_id,
+        g.name AS GenreName,
+        a.created_at
+      FROM albums a
+      JOIN artists ar ON a.artist_id = ar.artist_id
+      JOIN genres g ON a.genre_id = g.genre_id
+      ORDER BY a.created_at DESC
+    `);
     res.json(rows);
   } catch (err) {
     console.error('Get albums error:', err.message);
@@ -721,25 +665,28 @@ router.get('/albums', async (req, res) => {
   }
 });
 
-// Get all tracks with metadata
+// Get all tracks with full metadata
 router.get('/tracks', async (req, res) => {
   try {
     const [rows] = await pool.query(`
       SELECT 
         t.track_id AS TrackID,
         t.title AS Title,
-        t.duration AS Duration,
-        t.AlbumID,
-        a.Title AS AlbumTitle,
-        a.ReleaseYear,
-        t.ArtistID,
-        ar.Name AS ArtistName,
-        t.GenreID,
-        g.Name AS GenreName
-      FROM Track t
-      JOIN Album a ON t.AlbumID = a.AlbumID
-      JOIN Artist ar ON t.ArtistID = ar.ArtistID
-      JOIN Genre g ON t.GenreID = g.GenreID
+        t.duration_seconds AS Duration,
+        t.file_path AS FilePath,
+        a.album_id AS AlbumID,
+        a.title AS AlbumTitle,
+        a.release_year AS ReleaseYear,
+        ar.artist_id AS ArtistID,
+        ar.name AS ArtistName,
+        g.genre_id AS GenreID,
+        g.name AS GenreName,
+        t.created_at AS TrackCreated
+      FROM tracks t
+      JOIN albums a ON t.album_id = a.album_id
+      JOIN artists ar ON t.artist_id = ar.artist_id
+      JOIN genres g ON t.genre_id = g.genre_id
+      ORDER BY t.created_at DESC
     `);
     res.json(rows);
   } catch (err) {

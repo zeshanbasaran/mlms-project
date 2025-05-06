@@ -12,25 +12,24 @@ const pool = require('../db');
 const router = express.Router();
 
 /**
- * Validates an email address and restricts domain to allowed TLDs
+ * Utility: Validates an email address and restricts domain to allowed TLDs
  */
 const allowedTLDs = ['.com', '.edu', '.org', '.net'];
-const isValidEmail = (email) => {
+function isValidEmail(email) {
   const pattern = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/i;
   if (!pattern.test(email)) return false;
   const tld = '.' + email.split('.').pop();
   return allowedTLDs.includes(tld.toLowerCase());
-};
+}
 
-/* ===========================
-   USER REGISTRATION
-=========================== */
+// ===========================
+// User Registration
+// ===========================
 
 router.post('/register', async (req, res) => {
-  let { name, email, password, role } = req.body;
+  let { name, email, password, role, subscriptionPlan } = req.body;
 
   try {
-    // Basic validation
     if (!name || !email || !password) {
       return res.status(400).json({ message: 'All fields are required' });
     }
@@ -38,67 +37,70 @@ router.post('/register', async (req, res) => {
     name = name.trim();
     email = email.trim().toLowerCase();
 
-    // Validate email format and TLD
     if (!isValidEmail(email)) {
       return res.status(400).json({ message: 'Email must be a valid .com, .edu, .org, or .net address' });
     }
 
-    // Check if email is already registered
-    const [existing] = await pool.query('SELECT * FROM User WHERE email = ?', [email]);
+    const [existing] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
     if (existing.length > 0) {
       return res.status(409).json({ message: 'Email already registered' });
     }
 
-    // Hash password and insert user
     const hashedPassword = await bcrypt.hash(password, 10);
-    await pool.query(
-      'INSERT INTO User (name, email, password, role) VALUES (?, ?, ?, ?)',
-      [name, email, hashedPassword, role || 'user']
+    const [result] = await pool.query(
+      'INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)',
+      [name, email, hashedPassword, role === 'admin' ? 'admin' : 'regular_user']
     );
+
+    const userId = result.insertId;
+
+    // Auto-create a subscription if the user is not an admin and selected a plan
+    if (role !== 'admin' && subscriptionPlan) {
+      await pool.query(
+        `INSERT INTO subscriptions (user_id, subscription_type, start_date, end_date, is_active)
+         VALUES (?, ?, NOW(), DATE_ADD(NOW(), INTERVAL 30 DAY), 1)`,
+        [userId, subscriptionPlan]
+      );
+    }
 
     res.status(201).json({ message: 'User registered successfully' });
   } catch (err) {
-    console.error('REGISTER ERROR:', err.message);
+    console.error('Register error:', err.message);
     res.status(500).json({ message: 'Server error during registration' });
   }
 });
 
-/* ===========================
-   USER LOGIN
-=========================== */
+// ===========================
+// User Login
+// ===========================
 
 router.post('/login', async (req, res) => {
   let { email, password } = req.body;
 
   try {
     if (!email || !password) {
-      return res.status(400).json({ message: 'Email and password required' });
+      return res.status(400).json({ message: 'Email and password are required' });
     }
 
     email = email.trim().toLowerCase();
 
-    // Find user by email
-    const [rows] = await pool.query('SELECT * FROM User WHERE email = ?', [email]);
+    const [rows] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
     if (rows.length === 0) {
       return res.status(401).json({ message: 'User not found' });
     }
 
     const user = rows[0];
-
-    // Compare provided password with hashed password
-    const isMatch = await bcrypt.compare(password, user.password);
+    const isMatch = await bcrypt.compare(password, user.password_hash);
     if (!isMatch) {
       return res.status(401).json({ message: 'Invalid password' });
     }
 
-    // Generate JWT token
     const token = jwt.sign(
       { id: user.user_id, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: '1h' }
     );
 
-    // Return token and basic user info
     res.json({
       token,
       user: {
@@ -109,7 +111,7 @@ router.post('/login', async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('LOGIN ERROR:', err.message);
+    console.error('Login error:', err.message);
     res.status(500).json({ message: 'Server error during login' });
   }
 });
